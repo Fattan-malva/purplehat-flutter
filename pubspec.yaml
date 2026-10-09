@@ -1,0 +1,53 @@
+name: purplehat
+description: "PurpleHat Screen Player - pembungkus webview WebView2."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  webview_win_floating: ^3.0.3
+  webview_flutter: ^4.13.0
+  webview_flutter_android: ^4.14.1
+  flutter_volume_controller: ^2.0.2
+  http: ^1.1.0 
+  window_manager: ^0.5.1
+
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - lib/assets/icons/
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "lib/assets/icons/icon-512.png"
+  adaptive_icon_background: "#9333EA"
+  adaptive_icon_foreground: "lib/assets/icons/icon-512.png"
+  min_sdk_android: 21
+  remove_alpha_ios: true
+  web:
+    generate: true
+    image_path: "lib/assets/icons/icon-512.png"
+    background_color: "#9333EA"
+    theme_color: "#9333EA"
+  windows:
+    generate: true
+    image_path: "lib/assets/icons/icon-512.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "lib/assets/icons/icon-512.png"
+  linux:
+    generate: true
+    image_path: "lib/assets/icons/icon-512.png"
