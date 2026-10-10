@@ -34,7 +34,7 @@ dialog, atau tombol apa pun.
 
 ## Ikon
 
-Semua ikon dibuat dari `lib/assets/icons/icon-512.png` untuk Android (adaptive),
+Semua ikon dibuat dari `lib/assets/icons/new.png` untuk Android (adaptive),
 iOS, macOS, Windows, Linux, dan Web:
 
 ```bash
