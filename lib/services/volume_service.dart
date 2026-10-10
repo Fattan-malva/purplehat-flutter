@@ -6,7 +6,12 @@ import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 ///
 /// - Windows : lewat MethodChannel "purplehat/native" memakai Core Audio
 ///   (IAudioEndpointVolume), persis seperti `SetSystemVolume` versi WinForms.
-/// - Android/iOS : lewat plugin `flutter_volume_controller`.
+///   CATATAN: jangan diubah, sudah fix.
+/// - Android : lewat plugin `flutter_volume_controller` -> Android
+///   `AudioManager.setStreamVolume()` dengan stream `STREAM_MUSIC`
+///   (volume media/sistem yang diatur tombol volume). Butuh permission
+///   `MODIFY_AUDIO_SETTINGS` di AndroidManifest.
+/// - iOS/macOS/Linux : lewat plugin `flutter_volume_controller`.
 class VolumeService {
   static const MethodChannel _channel = MethodChannel('purplehat/native');
 
@@ -23,19 +28,32 @@ class VolumeService {
         await _channel.invokeMethod<void>('setSystemVolume', <String, dynamic>{
           'value': percent,
         });
-        print('Volume set to: $percent%');
       } on MissingPluginException {
-        print('SetSystemVolume: channel purplehat/native tidak tersedia.');
+        
       } catch (e) {
         print('SetSystemVolume error: $e');
       }
       return;
     }
 
-    // Android / iOS / macOS / Linux.
+    // Android: ubah volume sistem lewat AudioManager.setStreamVolume().
+    // Stream `music` = AudioManager.STREAM_MUSIC, yaitu volume media/sistem
+    // yang diatur tombol volume perangkat.
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        await FlutterVolumeController.setVolume(
+          value,
+          stream: AudioStream.music,
+        );
+      } catch (e) {
+        print('SetSystemVolume (Android) error: $e');
+      }
+      return;
+    }
+
+    // iOS / macOS / Linux.
     try {
       await FlutterVolumeController.setVolume(value);
-      print('Volume set to: $value');
     } catch (e) {
       print('SetSystemVolume error: $e');
     }

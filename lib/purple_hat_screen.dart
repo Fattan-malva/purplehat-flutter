@@ -207,10 +207,73 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
       print('Bridge inject error: $e');
     }
 
-    // Android: matikan efek render yang paling berat di GPU supaya UI tidak
-    // patah-patah. Hanya menyentuh efek, tata letak tidak berubah.
     if (!_isDesktop) {
+      // Android: jembatani perintah volume dari web -> volume sistem Android.
+      await _injectAndroidBridge();
+
+      // Android: matikan efek render yang paling berat di GPU supaya UI tidak
+      // patah-patah. Hanya menyentuh efek, tata letak tidak berubah.
       await _applyAndroidPerformanceTweaks();
+    }
+  }
+
+  /// Android: menghubungkan perintah volume web ke volume sistem Android.
+  ///
+  /// `screen.js` memutuskan apakah dirinya berjalan di wrapper desktop lewat
+  /// `isDesktop = !!(window.chrome && window.chrome.webview && ...)`.
+  /// `window.chrome.webview` (WebView2) hanya ada di Windows, jadi di Android
+  /// `isDesktop` bernilai false dan slider volume controller hanya mengubah
+  /// volume internal iframe pemutar — volume sistem Android tidak tersentuh.
+  ///
+  /// Shim ini:
+  ///   1. menyediakan `window.chrome.webview.postMessage` palsu yang
+  ///      meneruskan pesan ke JavaScript channel `purpleHatBridge`, dan
+  ///   2. memaksa `isDesktop = true` supaya `screen.js` mengirim nilai volume
+  ///      ke host (Flutter), bukan ke iframe.
+  ///
+  /// Lalu Flutter memanggil `AudioManager.setStreamVolume(STREAM_MUSIC,
+  /// FLAG_SHOW_UI)`, sehingga volume sistem berubah DAN panel volume sistem
+  /// muncul — persis seperti menekan tombol volume perangkat.
+  Future<void> _injectAndroidBridge() async {
+    const androidBridgeScript = r'''
+    (function () {
+      try {
+        // Hanya untuk halaman pemutar yang memuat screen.js.
+        if (typeof window.setVolume !== 'function') return;
+        // Cukup sekali per halaman (onPageFinished bisa terpanggil beberapa kali).
+        if (window.__phAndroidBridgeInstalled) return;
+        window.__phAndroidBridgeInstalled = true;
+
+        // 1) API WebView2 palsu -> JavaScript channel 'purpleHatBridge'.
+        if (!window.chrome) { window.chrome = {}; }
+        if (!window.chrome.webview) { window.chrome.webview = {}; }
+        window.chrome.webview.postMessage = function (msg) {
+          try {
+            var payload = (typeof msg === 'string') ? msg : JSON.stringify(msg);
+            if (window.purpleHatBridge && window.purpleHatBridge.postMessage) {
+              window.purpleHatBridge.postMessage(payload);
+            }
+          } catch (e) {}
+        };
+
+        // 2) Paksa mode desktop. `var isDesktop` di screen.js adalah variabel
+        //    global, jadi mengubah window.isDesktop mengubah perilakunya.
+        try { window.isDesktop = true; } catch (e) {}
+
+        // 3) Sinkronkan volume yang sedang aktif ke host (dan set volume iframe
+        //    ke 100 agar tidak dobel atenuasi), supaya volume sistem langsung
+        //    mengikuti angka di controller tanpa harus digeser dulu.
+        try {
+          window.setVolume(typeof window.volume === 'number' ? window.volume : 30);
+        } catch (e) {}
+      } catch (e) {}
+    })();
+    ''';
+
+    try {
+      await _controller.runJavaScript(androidBridgeScript);
+    } catch (e) {
+      print('Android bridge inject error: $e');
     }
   }
 
