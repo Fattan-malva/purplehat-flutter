@@ -12,13 +12,14 @@ import 'native_window.dart';
 ///   ringan (hanya menyambung ke named pipe, tidak mengelola proses mpv).
 /// - Semua perintah pemutaran tetap lewat JSON IPC dan responsif/realtime.
 ///
-/// mpv dibiarkan hidup dalam mode `--idle` (tanpa jendela sampai ada lagu),
-/// jadi backend bisa mengirim perintah kapan saja.
+/// mpv dijalankan LAZY (saat lagu pertama diputar), bukan di startup.
 class MpvService {
   MpvService._();
 
   static Process? _proc;
   static String? _exePath;
+  static bool _started = false;
+  static bool _starting = false;
 
   /// Lokasi `mpv.exe`: `<dir exe>/mpv/mpv.exe`, fallback `<dir exe>/mpv.exe`.
   static String? resolveExe() {
@@ -40,10 +41,12 @@ class MpvService {
     return null;
   }
 
-  /// Jalankan mpv (sekali). Bila mpv tidak ada, lewati dengan log — layar web
-  /// tetap jalan dan backend akan memakai fallback-nya (spawn mpv sendiri).
-  static Future<void> start() async {
+  /// Jalankan mpv (sekali, lazy). Bila mpv tidak ada, lewati dengan log.
+  static Future<void> ensureStarted() async {
     if (!Platform.isWindows) return;
+    if (_started || _starting) return;
+
+    _starting = true;
 
     final exe = resolveExe();
     if (exe == null) {
@@ -51,6 +54,7 @@ class MpvService {
         'MpvService: mpv.exe tidak ditemukan di folder aplikasi. '
         'Jalankan tools/download_mpv.ps1 lalu build ulang.',
       );
+      _starting = false;
       return;
     }
 
@@ -71,13 +75,13 @@ class MpvService {
     }
     if (hwnd != null) {
       args.add('--wid=$hwnd');
+      // Pastikan mpv buat window child meski idle (--force-window=immediate)
+      args.add('--force-window=immediate');
     } else {
       args.addAll(PHConfig.mpvArgsSeparateWindow);
     }
 
     try {
-      // `detached` -> tidak ada pipe stdout/stderr yang menggantung; mpv hidup
-      // mandiri dan bisa dikontrol lewat named pipe IPC.
       _proc = await Process.start(
         exe,
         args,
@@ -87,14 +91,42 @@ class MpvService {
       // Tunggu sampai named pipe IPC mpv benar-benar terbuka (status standby),
       // supaya saat backend mengirim perintah play, mpv sudah siap dipanggil.
       final ready = await _waitForIpcPipe();
+      if (!ready) {
+        // Pipe belum terlihat, tapi mpv mungkin sudah jalan. Tunggu sebentar lagi.
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
       debugPrint(
-        'MpvService: mpv standby ($exe) pipe=${PHConfig.mpvPipe} '
+        'MpvService: mpv started ($exe) pipe=${PHConfig.mpvPipe} '
         '${hwnd != null ? 'embedded wid=$hwnd' : 'window terpisah'} '
         '${ready ? '' : '[pipe belum terlihat!]'}',
       );
+      _started = true;
+      // Jika embed, usahakan child mpv berada di atas jendela Flutter.
+      if (hwnd != null) {
+        // Delay sedikit agar mpv child muncul, lalu bawa ke depan.
+        Future.delayed(const Duration(milliseconds: 300), () async {
+          await NativeWindow.bringMpvToFront(hwnd!);
+        });
+        // Pastikan ukuran child mengikuti Flutter window
+        Future.delayed(const Duration(milliseconds: 500), () async {
+          await NativeWindow.resizeMpvChild(hwnd!);
+        });
+      }
     } catch (e) {
       debugPrint('MpvService: gagal menjalankan mpv: $e');
+    } finally {
+      _starting = false;
     }
+  }
+
+  /// Cek apakah mpv sudah berjalan.
+  static bool get isRunning => _started && _proc != null;
+
+  /// Cek apakah mpv pipe sudah siap (IPC ready).
+  static Future<bool> isReady() async {
+    if (!Platform.isWindows) return false;
+    if (!_started) return false;
+    return await _waitForIpcPipe(timeout: Duration(seconds: 2));
   }
 
   /// Tunggu (maks ~6 detik) sampai named pipe IPC mpv muncul di `\\.\pipe\`.
@@ -135,6 +167,7 @@ class MpvService {
       _proc?.kill();
     } catch (_) {}
     _proc = null;
+    _started = false;
     if (PHConfig.killMpvOnClose) {
       await _taskkill();
     }

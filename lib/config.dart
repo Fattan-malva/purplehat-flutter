@@ -9,10 +9,10 @@ class PHConfig {
   ///
   /// MAC device akan ditambahkan otomatis sebagai query `?mac=...` (lihat
   /// `purple_hat_screen.dart`) supaya layar me-resolve room yang tepat.
-  // static const String screenUrl =
-  //     'https://purplehat.mallvaa.xyz/screen/index.html';
   static const String screenUrl =
-      'https://cqz19d4x-3000.asse.devtunnels.ms/screen/index.html';
+      'https://purplehat.mallvaa.xyz/screen/index.html';
+  // static const String screenUrl =
+  //     'https://cqz19d4x-3000.asse.devtunnels.ms/screen/index.html';
 
   // ---------------------------------------------------------------------------
   // mpv (sumber Karaoke)
@@ -42,17 +42,19 @@ class PHConfig {
 
   /// Argumen dasar mpv.
   ///
-  /// - `--force-window=no`: jendela video hanya muncul saat ada lagu; saat idle
-  ///   layar web (panggung karaoke) yang terlihat.
+  /// - `--force-window=immediate`: buat window child segera (embed mode).
+  ///   Saat idle layar web (panggung karaoke) yang terlihat.
   /// - `--keep-open=yes`: tetap hidup setelah lagu habis agar `eof-reached`
   ///   bisa dibaca backend (memicu auto-play lagu berikutnya).
+  /// - `--vo=gpu`: gunakan GPU rendering untuk performa terbaik di Windows.
   static const List<String> mpvArgs = <String>[
     '--idle=yes',
     '--keep-open=yes',
     '--no-terminal',
     '--osc=no',
     '--input-default-bindings=no',
-    '--force-window=no',
+    '--force-window=immediate',
+    '--vo=gpu',
     '--title=PurpleHat Karaoke',
   ];
 

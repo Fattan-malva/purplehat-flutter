@@ -30,6 +30,8 @@ Future<void> main() async {
       await windowManager.focus();
       // Pastikan benar-benar fullscreen (bukan sekedar maximize)
       await windowManager.setFullScreen(true);
+      // Transparan supaya mpv embed kelihatan - DISABLED untuk debug
+      // await windowManager.setBackgroundColor(Colors.transparent);
     });
   }
 

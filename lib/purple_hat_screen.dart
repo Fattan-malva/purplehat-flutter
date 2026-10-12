@@ -54,6 +54,7 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
     }
 
     _controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+    // Transparan supaya video mpv (embed --wid) kelihatan di belakang WebView
     _controller.setBackgroundColor(Colors.black);
 
     // JS Channel untuk komunikasi volume
@@ -93,15 +94,8 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
     _bootstrap();
   }
 
-  /// Jalankan mpv (sumber Karaoke), deteksi identitas device, lalu buka layar
-  /// dengan `?mac=...` supaya layar me-resolve room yang tepat (pairing stabil
-  /// per device). Lihat `docs/KARAOKE.md`.
+  /// Jalankan mpv (sumber Karaoke) di startup agar siap standby saat pairing.
   Future<void> _bootstrap() async {
-    // Windows: jalankan mpv yang ikut ter-bundle (folder `mpv/`).
-    if (_isDesktop) {
-      await MpvService.start();
-    }
-
     _deviceId = await DeviceIdentity.get();
 
     final base = Uri.parse(PHConfig.screenUrl);
@@ -142,10 +136,31 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
   void _handleWebMessage(String message) {
     try {
       final data = jsonDecode(message) as Map<String, dynamic>;
-      if (data['type'] != 'volume') return;
-
-      final double volume = (data['value'] as num).toDouble();
-      VolumeService.setVolumeFromPercent(volume);
+      if (data['type'] == 'volume') {
+        final double volume = (data['value'] as num).toDouble();
+        VolumeService.setVolumeFromPercent(volume);
+        return;
+      }
+      if (data['type'] == 'startMpv') {
+        // Lazy start mpv saat webview request play
+        if (_isDesktop) {
+          MpvService.ensureStarted();
+        }
+        return;
+      }
+      if (data['type'] == 'checkMpvReady') {
+        // Cek apakah mpv sudah siap dipakai
+        if (_isDesktop) {
+          MpvService.isReady().then((ready) {
+            _controller.runJavaScript('''
+              (function() {
+                if (window.onMpvReady) window.onMpvReady($ready);
+              })();
+            ''');
+          });
+        }
+        return;
+      }
     } catch (e) {
       print('WebMessage error: $e');
     }
@@ -201,6 +216,10 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
           postToBridge({ type: 'volume', value: v });
         }
 
+        function sendStartMpv() {
+          postToBridge({ type: 'startMpv' });
+        }
+
         function extractVolume(message) {
           try {
             var parsed = (typeof message === 'string')
@@ -246,6 +265,11 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
               nativePostMessage(typeof m === 'string' ? m : JSON.stringify(m));
             } catch (e) {}
           };
+        } catch (e) {}
+
+        // Ekspos fungsi startMpv ke global scope untuk screen.js
+        try {
+          window.startMpv = sendStartMpv;
         } catch (e) {}
 
         // Sinkronkan volume awal (var volume di screen.js -> window.volume).
