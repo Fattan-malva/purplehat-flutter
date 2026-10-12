@@ -7,30 +7,41 @@ Ringkasnya:
 
 - **Identitas device (MAC)** dideteksi Flutter lalu dikirim ke halaman layar,
   supaya backend me-resolve room yang tepat (`PairingCode` stabil per device).
-- **mpv dijalankan oleh Flutter** memakai `mpv.exe` yang **ikut ter-bundle** di
-  folder Release. Backend Python cukup **menyambung** ke named pipe (paling
-  ringan di sisi server, dan realtime lewat JSON IPC).
+- Setelah pairing controller berhasil, layar meminta Flutter menjalankan
+  `mpv.exe` lokal secara **standby**. Flutter menunggu IPC siap sebelum pindah
+  dari QR ke player. Jendela child mpv disembunyikan sampai video karaoke dimuat.
+- Pada Windows desktop, perintah `loadfile`, pause/play, seek, status, dan FX
+  dikirim dari halaman screen ke Flutter lalu melalui native runner ke named
+  pipe **lokal Windows**. Backend VPS tidak bisa membuka named pipe lokal itu.
+  Endpoint backend untuk kontrol mpv tetap tersedia sebagai fallback non-desktop.
 
 ---
 
 ## 1. Arsitektur
 
 ```
-Backend FastAPI (server)                    Kiosk / Player (Flutter)
-─────────────────────────                   ─────────────────────────
-                                             purplehat_flutter.exe
-                                               │ deteksi MAC
-                                               │ jalankan mpv.exe (bundle)
-                                               │  └─ --input-ipc-server=\\.\pipe\purplehat-mpv
-   karaoke/mpv.py ── JSON IPC (named pipe) ────┘
-        │
-        └─ pyodbc -> SQL Server (MstSongBank, MstRoom)
+Controller (HP) ──WebSocket──> Node/Express ──WebSocket──> Screen JS
+                                                               │
+                                                               │ host bridge
+                                                               v
+                                                    Flutter MethodChannel
+                                                               │
+                                                               v
+                                                     Windows named pipe IPC
+                                                               │
+                                                               v
+                                                         mpv.exe (local)
+
+Node/Express ──HTTP──> FastAPI ──pyodbc──> SQL Server (song bank / room)
 ```
 
-- Controller (HP) → Layar (WebView) → `POST /api/karaoke/player/*` → backend →
-  JSON IPC → **mpv di kiosk**.
-- **Server tidak mengelola proses mpv** (`MPV_LAUNCH=auto` menyambung dulu ke
-  pipe yang sudah ada).
+- Controller (HP) → Node WebSocket → screen JavaScript → Flutter bridge →
+  native Windows IPC → mpv lokal.
+- Saat pasangan berhasil, menu QR meminta mpv start dan **menunggu IPC siap**.
+  Jendela mpv tersembunyi selama standby; loading video menampilkan child window
+  mpv di atas area player.
+- `/api/karaoke/player/*` tetap digunakan sebagai fallback non-desktop, bukan
+  sebagai transport IPC dari VPS ke proses mpv Windows.
 - **Video di-embed ke dalam jendela Flutter**: mpv dijalankan dengan
   `--wid=<HWND>` (lihat `lib/services/native_window.dart`), jadi video tampil di
   dalam jendela aplikasi (bukan jendela terpisah). Saat idle tidak ada elemen
@@ -136,9 +147,11 @@ Saat aplikasi dijalankan, `MpvService` mencari mpv di
 2. **Backend** (Python + Node) tetap dideploy/dijalankan terpisah di kiosk
    (lihat `purplehat/README.md`) dengan `backend/.env` yang benar.
 
-> Pastikan nilai **pipe** sama di kedua sisi:
-> `lib/config.dart` → `mpvPipe` **=** `backend/.env` → `MPV_IPC_PIPE`
-> (default `\\.\pipe\purplehat-mpv`).
+> Pada Windows wrapper, `lib/config.dart` menentukan named pipe yang dibuka
+> oleh native runner (default `\\.\pipe\purplehat-mpv`). Backend FastAPI tidak
+> perlu mengakses pipe itu untuk playback Windows. Hanya bila menjalankan mode
+> fallback backend, pastikan `MPV_IPC_PIPE` menunjuk ke mpv yang benar-benar
+> dapat dijangkau oleh proses Python.
 
 ---
 
@@ -164,18 +177,19 @@ Di sisi backend (`backend/.env`): `MPV_LAUNCH=auto` (sambung-dulu-baru-spawn),
 ## 7. Verifikasi & troubleshooting
 
 - **Cek mpv jalan**: `tasklist | findstr mpv` (saat aplikasi terbuka).
-- **Cek endpoint**: buka `GET /api/karaoke/player/state` → `{"available": true, ...}`
-  bila backend sudah tersambung ke mpv. Bila `{"available": false, "error": ...}`,
-  baca pesannya (mpv tidak ditemukan / pipe tidak bisa dibuka / SQL Server).
+- **Cek mode Windows desktop**: lihat log `MpvService: mpv siap` dan proses
+  `mpv.exe` di Task Manager. Status playback di screen diperoleh dari mpv lokal,
+  bukan dari `GET /api/karaoke/player/state`.
+- **Backend fallback**: `GET /api/karaoke/player/state` memeriksa instance mpv
+  yang dilihat backend; hasil ini tidak membuktikan bahwa mpv lokal Windows siap.
 - **MAC salah / room beda**: cek log aplikasi (`DeviceIdentity: ...`). Bisa
   paksa nilai lewat query `?mac=` pada `screenUrl` untuk pengujian.
 - **Pitch (key shift) tidak berubah**: build mpv Anda tanpa librubberband —
   pakai build resmi dari script di atas. (Diverifikasi: build zhongfly
   mendukung `rubberband=pitch-scale=…`, `equalizer`, `aecho`, dan `pan` lavfi.)
-- **Video tidak muncul / jendela terpisah**: pastikan `embedInFlutter = true`.
-  Bila HWND jendela Flutter gagal dideteksi, otomatis fallback ke jendela
-  terpisah (lihat log `MpvService: ... window terpisah`). Untuk memaksa perilaku
-  lama, set `embedInFlutter = false`.
+- **Video tidak muncul**: pastikan `embedInFlutter = true` dan lihat log
+  `MpvService`. Jika HWND host tidak ditemukan, startup dibatalkan agar jendela
+  mpv fullscreen tidak menutupi layar pairing; periksa integrasi jendela native.
 - **Video embed tertutup layar web**: itu memang diharapkan saat lagu diputar.
   Setelah lagu berhenti (idle) elemen video hilang dan layar web terlihat lagi.
 
