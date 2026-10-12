@@ -202,14 +202,27 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
     final requestId = data['requestId'] is num
         ? (data['requestId'] as num).toInt()
         : 0;
-    final result = await MpvService.command(List<dynamic>.from(rawCommand));
-    final normalized = <String, dynamic>{
-      'ok': result['error'] == 'success',
-      'error': result['error'],
-      'message': result['message'],
-      'data': result['data'],
-      'command': rawCommand,
-    };
+
+    Map<String, dynamic> normalized;
+    try {
+      final result = await MpvService.command(List<dynamic>.from(rawCommand));
+      normalized = <String, dynamic>{
+        'ok': result['error'] == 'success',
+        'error': result['error'],
+        'message': result['message'],
+        'data': result['data'],
+        'command': rawCommand,
+      };
+    } catch (e) {
+      debugPrint('Mpv command error: $e');
+      normalized = <String, dynamic>{
+        'ok': false,
+        'error': 'native_exception',
+        'message': '$e',
+        'command': rawCommand,
+      };
+    }
+
     if (!mounted) return;
     try {
       await _controller.runJavaScript(

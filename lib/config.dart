@@ -18,11 +18,11 @@ class PHConfig {
   // mpv (sumber Karaoke)
   // ---------------------------------------------------------------------------
   // mpv DIJALANKAN oleh aplikasi ini memakai `mpv.exe` yang ikut ter-bundle di
-  // folder Release (lihat windows/CMakeLists.txt). Backend Python cukup
-  // menyambung ke named pipe di bawah ini (tidak menjalankan mpv sendiri).
+  // folder Release (lihat windows/CMakeLists.txt). Native runner Windows yang
+  // membuka named pipe ini; kontrol playback tidak melewati pipe dari VPS.
   //
-  // PENTING: nilai pipe di sini HARUS sama dengan `MPV_IPC_PIPE` di
-  // `backend/.env` (default: \\.\pipe\purplehat-mpv).
+  // `MPV_IPC_PIPE` di backend/.env hanya diperlukan untuk mode fallback backend
+  // yang memang menjalankan/mengakses instance mpv yang sama.
   static const String mpvPipe = r'\\.\pipe\purplehat-mpv';
 
   /// Nama subfolder di samping `purplehat_flutter.exe` yang berisi mpv.
@@ -36,8 +36,8 @@ class PHConfig {
   /// `true`  -> video tampil di dalam jendela aplikasi (tanpa jendela terpisah).
   /// `false` -> perilaku lama: mpv membuka jendela sendiri fullscreen + ontop.
   ///
-  /// Bila HWND jendela Flutter gagal dideteksi, otomatis jatuh ke mode jendela
-  /// terpisah supaya video tetap tampil.
+  /// Bila HWND jendela Flutter gagal dideteksi, startup mpv dibatalkan agar
+  /// jendela fullscreen tidak menutupi layar pairing. Periksa log MpvService.
   static const bool embedInFlutter = true;
 
   /// Argumen dasar mpv.
