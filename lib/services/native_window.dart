@@ -65,7 +65,7 @@ class NativeWindow {
     final child = await findMpvChild(parent);
     if (child == null) return;
     if (visible) {
-      await resizeMpvChild(parent);
+      _resizeChildToParent(parent, child);
       _setWindowPosTop(child);
       _showWindow(child, true);
     } else {
@@ -84,6 +84,10 @@ class NativeWindow {
   static Future<void> resizeMpvChild(int parent) async {
     final child = await findMpvChild(parent);
     if (child == null) return;
+    _resizeChildToParent(parent, child);
+  }
+
+  static void _resizeChildToParent(int parent, int child) {
     final getClientRect = _lib.lookupFunction<_GetClientRectNative, _GetClientRectDart>('GetClientRect');
     final setWindowPos = _lib.lookupFunction<_SetWindowPosNative, _SetWindowPosDart>('SetWindowPos');
     final rect = calloc<RECT>();

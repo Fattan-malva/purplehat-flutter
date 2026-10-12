@@ -79,9 +79,15 @@ class MpvService {
       return;
     }
 
-    // Jangan start ulang mpv hanya karena pipe sedang sibuk melayani satu
-    // perintah. Kesiapan IPC diperiksa terpisah sebelum setiap operasi.
-    if (_started && _proc != null) return;
+    if (_started && _proc != null && await _probeIpcPipe()) return;
+
+    // Proses mungkin mati sementara object Process masih tersimpan. Probe
+    // menganggap ERROR_SEM_TIMEOUT sebagai "siap" bila pipe hanya sedang sibuk.
+    if (_started && _proc != null) {
+      _started = false;
+      _proc = null;
+      _hwnd = null;
+    }
 
     final startup = _startInternal();
     _startingFuture = startup;
