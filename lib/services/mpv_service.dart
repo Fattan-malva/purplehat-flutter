@@ -23,7 +23,22 @@ class MpvService {
   static bool _started = false;
   static bool _paused = true;
   static Future<void>? _startingFuture;
+  static Future<void> _ipcTail = Future<void>.value();
   static int _requestId = 0;
+
+  /// Antrikan operasi penuh (bukan hanya satu baris IPC) supaya polling status
+  /// tidak menyela load/unpause atau stop/play yang datang berurutan.
+  static Future<T> _queueIpc<T>(Future<T> Function() operation) {
+    final completer = Completer<T>();
+    _ipcTail = _ipcTail.then((_) async {
+      try {
+        completer.complete(await operation());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    }).catchError((Object _) {});
+    return completer.future;
+  }
 
   static final Map<String, dynamic> _fx = <String, dynamic>{
     'pitch': 0.0,
@@ -196,7 +211,15 @@ class MpvService {
   }
 
   /// Kirim satu perintah JSON IPC ke mpv pada komputer Windows ini.
-  static Future<Map<String, dynamic>> command(List<dynamic> command) async {
+  static Future<Map<String, dynamic>> command(List<dynamic> command) {
+    return _queueIpc<Map<String, dynamic>>(
+      () => _commandInternal(command),
+    );
+  }
+
+  static Future<Map<String, dynamic>> _commandInternal(
+    List<dynamic> command,
+  ) async {
     if (!Platform.isWindows) {
       return <String, dynamic>{'error': 'unsupported_platform'};
     }
@@ -274,7 +297,11 @@ class MpvService {
   }
 
   /// State lokal mpv; tidak meminta status dari backend yang mungkin berada VPS.
-  static Future<Map<String, dynamic>> getState() async {
+  static Future<Map<String, dynamic>> getState() {
+    return _queueIpc<Map<String, dynamic>>(_getStateInternal);
+  }
+
+  static Future<Map<String, dynamic>> _getStateInternal() async {
     if (!Platform.isWindows || !_started) {
       return <String, dynamic>{
         'available': false,
@@ -310,8 +337,9 @@ class MpvService {
 
   static Future<Map<String, dynamic>> applyFx(
     Map<String, dynamic> fx,
-  ) async {
-    for (final key in <String>[
+  ) {
+    return _queueIpc<Map<String, dynamic>>(() async {
+      for (final key in <String>[
       'pitch',
       'echo',
       'tempo',
@@ -320,8 +348,9 @@ class MpvService {
       'channel',
     ]) {
       if (fx.containsKey(key) && fx[key] != null) _fx[key] = fx[key];
-    }
-    return _applyFx();
+      }
+      return _applyFx();
+    });
   }
 
   static Future<Map<String, dynamic>> _applyFx() async {
