@@ -45,6 +45,9 @@ class FlutterWindow : public Win32Window {
   // MethodChannel "purplehat/native": setSystemVolume (Core Audio).
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
 
+  // MethodChannel "purplehat/mpv": akses IPC mpv lokal di Windows.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> mpv_channel_;
+
   std::atomic<bool> cursor_hidden_{false};
 };
 

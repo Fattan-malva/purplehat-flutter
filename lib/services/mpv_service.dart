@@ -1,27 +1,39 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import '../config.dart';
 import 'native_window.dart';
 
-/// Menjalankan mpv (sumber Karaoke) yang IKUT ter-bundle di folder aplikasi.
-///
-/// Desain (lihat `docs/KARAOKE.md`):
-/// - Flutter yang menjalankan `mpv.exe` -> backend Python di sisi server jadi
-///   ringan (hanya menyambung ke named pipe, tidak mengelola proses mpv).
-/// - Semua perintah pemutaran tetap lewat JSON IPC dan responsif/realtime.
-///
-/// mpv dijalankan LAZY (saat lagu pertama diputar), bukan di startup.
+/// Menjalankan mpv lokal pada kiosk Windows dan mengendalikannya melalui
+/// named-pipe IPC yang dibuka oleh native runner. Backend tidak perlu berada
+/// pada mesin yang sama dengan mpv.
 class MpvService {
   MpvService._();
 
+  static const MethodChannel _ipc = MethodChannel('purplehat/mpv');
+
   static Process? _proc;
   static String? _exePath;
+  static int? _hwnd;
   static bool _started = false;
-  static bool _starting = false;
+  static Future<void>? _startingFuture;
+  static int _requestId = 0;
 
-  /// Lokasi `mpv.exe`: `<dir exe>/mpv/mpv.exe`, fallback `<dir exe>/mpv.exe`.
+  static final Map<String, dynamic> _fx = <String, dynamic>{
+    'pitch': 0.0,
+    'echo': 0,
+    'tempo': 1.0,
+    'bass': 0,
+    'treble': 0,
+    'channel': 'stereo',
+  };
+
+  /// Lokasi mpv.exe: <folder executable>/mpv/mpv.exe, lalu fallback mpv.exe.
   static String? resolveExe() {
     if (!Platform.isWindows) return null;
     if (_exePath != null && File(_exePath!).existsSync()) return _exePath;
@@ -32,51 +44,64 @@ class MpvService {
       '$exeDir$sep${PHConfig.mpvSubDir}$sep${PHConfig.mpvExe}',
       '$exeDir$sep${PHConfig.mpvExe}',
     ];
-    for (final c in candidates) {
-      if (File(c).existsSync()) {
-        _exePath = c;
-        return c;
+    for (final candidate in candidates) {
+      if (File(candidate).existsSync()) {
+        _exePath = candidate;
+        return candidate;
       }
     }
     return null;
   }
 
-  /// Jalankan mpv (sekali, lazy). Bila mpv tidak ada, lewati dengan log.
+  /// Start lazy setelah pairing. Pemanggilan paralel ikut menunggu startup sama.
   static Future<void> ensureStarted() async {
     if (!Platform.isWindows) return;
-    if (_started || _starting) return;
 
-    _starting = true;
+    final pending = _startingFuture;
+    if (pending != null) {
+      await pending;
+      return;
+    }
 
+    if (_started) {
+      if (await _probeIpcPipe()) return;
+      _started = false;
+    }
+
+    final startup = _startInternal();
+    _startingFuture = startup;
+    try {
+      await startup;
+    } finally {
+      if (identical(_startingFuture, startup)) _startingFuture = null;
+    }
+  }
+
+  static Future<void> _startInternal() async {
     final exe = resolveExe();
     if (exe == null) {
       debugPrint(
         'MpvService: mpv.exe tidak ditemukan di folder aplikasi. '
         'Jalankan tools/download_mpv.ps1 lalu build ulang.',
       );
-      _starting = false;
+      _started = false;
       return;
     }
 
-    if (PHConfig.killMpvOnStart) {
-      await _taskkill();
-    }
+    if (PHConfig.killMpvOnStart) await _taskkill();
+
+    int? hwnd;
+    if (PHConfig.embedInFlutter) hwnd = await NativeWindow.flutterWindow();
 
     final args = <String>[
       '--input-ipc-server=${PHConfig.mpvPipe}',
       ...PHConfig.mpvArgs,
     ];
-
-    // Embed video ke DALAM jendela Flutter (--wid=<HWND>). Bila HWND tidak
-    // terdeteksi, jatuh ke mode jendela mpv terpisah (fullscreen + ontop).
-    int? hwnd;
-    if (PHConfig.embedInFlutter) {
-      hwnd = await NativeWindow.flutterWindow();
-    }
     if (hwnd != null) {
       args.add('--wid=$hwnd');
-      // Pastikan mpv buat window child meski idle (--force-window=immediate)
-      args.add('--force-window=immediate');
+      if (!args.any((arg) => arg.startsWith('--force-window'))) {
+        args.add('--force-window=immediate');
+      }
     } else {
       args.addAll(PHConfig.mpvArgsSeparateWindow);
     }
@@ -88,100 +113,297 @@ class MpvService {
         workingDirectory: File(exe).parent.path,
         mode: ProcessStartMode.detached,
       );
-      // Tunggu sampai named pipe IPC mpv benar-benar terbuka (status standby),
-      // supaya saat backend mengirim perintah play, mpv sudah siap dipanggil.
+
       final ready = await _waitForIpcPipe();
       if (!ready) {
-        // Pipe belum terlihat, tapi mpv mungkin sudah jalan. Tunggu sebentar lagi.
-        await Future<void>.delayed(const Duration(milliseconds: 500));
+        try {
+          _proc?.kill();
+        } catch (_) {}
+        _proc = null;
+        _hwnd = null;
+        _started = false;
+        debugPrint(
+          'MpvService: proses mpv berjalan tetapi named pipe IPC tidak siap.',
+        );
+        return;
       }
-      debugPrint(
-        'MpvService: mpv started ($exe) pipe=${PHConfig.mpvPipe} '
-        '${hwnd != null ? 'embedded wid=$hwnd' : 'window terpisah'} '
-        '${ready ? '' : '[pipe belum terlihat!]'}',
-      );
+
+      _hwnd = hwnd;
       _started = true;
-      // Jika embed, usahakan child mpv berada di atas jendela Flutter.
+      debugPrint(
+        'MpvService: mpv siap ($exe), pipe=${PHConfig.mpvPipe}, '
+        '${hwnd != null ? 'embedded wid=$hwnd' : 'jendela terpisah'}.',
+      );
+
+      // mpv memakai --force-window=immediate; sembunyikan jendela kosong
+      // setelah native child window tersedia, agar QR/player web tetap terlihat.
       if (hwnd != null) {
-        // Delay sedikit agar mpv child muncul, lalu bawa ke depan.
-        Future.delayed(const Duration(milliseconds: 300), () async {
-          await NativeWindow.bringMpvToFront(hwnd!);
-        });
-        // Pastikan ukuran child mengikuti Flutter window
-        Future.delayed(const Duration(milliseconds: 500), () async {
+        Future<void>.delayed(const Duration(milliseconds: 350), () async {
           await NativeWindow.resizeMpvChild(hwnd!);
+          await NativeWindow.setMpvVisible(hwnd, false);
         });
       }
-    } catch (e) {
-      debugPrint('MpvService: gagal menjalankan mpv: $e');
-    } finally {
-      _starting = false;
+    } catch (error) {
+      _started = false;
+      _proc = null;
+      _hwnd = null;
+      debugPrint('MpvService: gagal menjalankan mpv: $error');
     }
   }
 
-  /// Cek apakah mpv sudah berjalan.
   static bool get isRunning => _started && _proc != null;
 
-  /// Cek apakah mpv pipe sudah siap (IPC ready).
-  static Future<bool> isReady() async {
+  static Future<bool> _probeIpcPipe() async {
     if (!Platform.isWindows) return false;
-    if (!_started) return false;
-    return await _waitForIpcPipe(timeout: Duration(seconds: 2));
+    try {
+      return await _ipc.invokeMethod<bool>('ready') ?? false;
+    } on PlatformException catch (error) {
+      debugPrint('MpvService: probe IPC gagal: ${error.message}');
+      return false;
+    } on MissingPluginException {
+      debugPrint('MpvService: native IPC channel belum tersedia.');
+      return false;
+    }
   }
 
-  /// Tunggu (maks ~6 detik) sampai named pipe IPC mpv muncul di `\\.\pipe\`.
-  /// Named pipe dibuat mpv saat startup, jadi keberadaannya = mpv siap standby.
+  static Future<bool> isReady() async {
+    if (!Platform.isWindows || !_started) return false;
+    final ready = await _probeIpcPipe();
+    if (!ready) _started = false;
+    return ready;
+  }
+
   static Future<bool> _waitForIpcPipe({
     Duration timeout = const Duration(seconds: 6),
   }) async {
-    if (!Platform.isWindows) return false;
-    final pipePath = PHConfig.mpvPipe; // mis. \\.\pipe\purplehat-mpv
-    if (!pipePath.startsWith(r'\\')) return false;
-    final sep = pipePath.lastIndexOf(r'\');
-    final pipeDir = pipePath.substring(0, sep);      // \\.\pipe
-    final pipeName = pipePath.substring(sep + 1);    // purplehat-mpv
-
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
-      try {
-        final dir = Directory(pipeDir);
-        if (dir.existsSync()) {
-          for (final e in dir.listSync()) {
-            if (e.path.toLowerCase().endsWith(pipeName.toLowerCase())) {
-              return true;
-            }
-          }
-        }
-      } catch (_) {
-        // Pipe directory kadang belum siap -> ulangi.
-      }
+      if (await _probeIpcPipe()) return true;
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     return false;
   }
 
-  /// Hentikan mpv saat aplikasi ditutup.
+  /// Kirim satu perintah JSON IPC ke mpv pada komputer Windows ini.
+  static Future<Map<String, dynamic>> command(List<dynamic> command) async {
+    if (!Platform.isWindows) {
+      return <String, dynamic>{'error': 'unsupported_platform'};
+    }
+    if (command.isEmpty) {
+      return <String, dynamic>{'error': 'empty_command'};
+    }
+    if (!_started) await ensureStarted();
+    if (!await isReady()) {
+      return <String, dynamic>{
+        'error': 'mpv_not_ready',
+        'message': 'mpv belum siap menerima perintah.',
+      };
+    }
+
+    final response = await _sendRaw(command);
+    final success = response['error'] == 'success';
+    if (success && command.first == 'loadfile') {
+      await _sendRaw(<dynamic>['set_property', 'pause', false]);
+      await _applyFx();
+      await _setVideoVisible(true);
+    } else if (success && command.first == 'stop') {
+      await _setVideoVisible(false);
+    }
+    return response;
+  }
+
+  static Future<Map<String, dynamic>> _sendRaw(List<dynamic> command) async {
+    if (!Platform.isWindows || !await _probeIpcPipe()) {
+      return <String, dynamic>{'error': 'mpv_not_ready'};
+    }
+
+    final requestId = ++_requestId;
+    try {
+      final raw = await _ipc.invokeMethod<String>(
+        'command',
+        <String, dynamic>{
+          'json': jsonEncode(<String, dynamic>{
+            'command': command,
+            'request_id': requestId,
+          }),
+        },
+      );
+      if (raw == null || raw.isEmpty) {
+        return <String, dynamic>{'error': 'empty_ipc_response'};
+      }
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) {
+        return <String, dynamic>{'error': 'invalid_ipc_response', 'raw': raw};
+      }
+      if (decoded['request_id'] != requestId) {
+        debugPrint(
+          'MpvService: request_id tidak cocok '
+          '(expected=$requestId, received=${decoded['request_id']}).',
+        );
+      }
+      return Map<String, dynamic>.from(decoded);
+    } catch (error) {
+      debugPrint('MpvService: IPC command gagal: $error');
+      return <String, dynamic>{'error': 'ipc_exception', 'message': '$error'};
+    }
+  }
+
+  static Future<dynamic> _property(String name) async {
+    final response = await _sendRaw(<dynamic>['get_property', name]);
+    return response['error'] == 'success' ? response['data'] : null;
+  }
+
+  /// State lokal mpv; tidak meminta status dari backend yang mungkin berada VPS.
+  static Future<Map<String, dynamic>> getState() async {
+    if (!Platform.isWindows || !await isReady()) {
+      return <String, dynamic>{
+        'available': false,
+        'playing': false,
+        'paused': false,
+        'position': 0,
+        'duration': 0,
+        'path': null,
+        'ended': false,
+      };
+    }
+
+    // Berurutan karena mpv Windows memakai satu instance named-pipe server.
+    final paused = await _property('pause');
+    final position = await _property('time-pos');
+    final duration = await _property('duration');
+    final path = await _property('path');
+    final endedValue = await _property('eof-reached');
+    final ended = endedValue == true;
+    final hasFile = path is String && path.isNotEmpty;
+
+    return <String, dynamic>{
+      'available': true,
+      'playing': hasFile && paused != true && !ended,
+      'paused': paused == true,
+      'position': (position as num?)?.toDouble() ?? 0.0,
+      'duration': (duration as num?)?.toDouble() ?? 0.0,
+      'path': path,
+      'ended': ended,
+    };
+  }
+
+  static Future<Map<String, dynamic>> applyFx(
+    Map<String, dynamic> fx,
+  ) async {
+    for (final key in <String>[
+      'pitch',
+      'echo',
+      'tempo',
+      'bass',
+      'treble',
+      'channel',
+    ]) {
+      if (fx.containsKey(key) && fx[key] != null) _fx[key] = fx[key];
+    }
+    return _applyFx();
+  }
+
+  static Future<Map<String, dynamic>> _applyFx() async {
+    final af = _buildAudioFilter(_fx);
+    final afResult = await _sendRaw(<dynamic>['set_property', 'af', af]);
+    await _sendRaw(<dynamic>['set_property', 'audio-pitch-correction', 'yes']);
+
+    final tempoValue = double.tryParse('${_fx['tempo']}') ?? 1.0;
+    final tempo = tempoValue.clamp(0.5, 2.0);
+    await _sendRaw(<dynamic>['set_property', 'speed', tempo]);
+
+    return <String, dynamic>{
+      'ok': afResult['error'] == 'success',
+      'error': afResult['error'],
+      'af': af,
+    };
+  }
+
+  static String _buildAudioFilter(Map<String, dynamic> fx) {
+    final parts = <String>[];
+    final lavfi = <String>[];
+    final channel = '${fx['channel'] ?? 'stereo'}'.toLowerCase();
+    const musicChannel = 'left';
+
+    switch (channel) {
+      case 'left':
+        lavfi.add('pan=stereo|c0=c0|c1=c0');
+        break;
+      case 'right':
+        lavfi.add('pan=stereo|c0=c1|c1=c1');
+        break;
+      case 'mono':
+        lavfi.add('pan=mono|c0=0.5*c0+0.5*c1');
+        break;
+      case 'music':
+      case 'instrumental':
+        lavfi.add(musicChannel == 'right'
+            ? 'pan=stereo|c0=c1|c1=c1'
+            : 'pan=stereo|c0=c0|c1=c0');
+        break;
+      case 'vocal':
+      case 'guide':
+        lavfi.add(musicChannel == 'right'
+            ? 'pan=stereo|c0=c0|c1=c0'
+            : 'pan=stereo|c0=c1|c1=c1');
+        break;
+      case 'vocal-off':
+      case 'vocaloff':
+      case 'cancel':
+        lavfi.add('pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0');
+        break;
+    }
+
+    final echo = (double.tryParse('${fx['echo'] ?? 0}') ?? 0).round();
+    if (echo > 0) {
+      final decay = (0.1 + (echo / 100.0) * 0.8).clamp(0.0, 0.9);
+      final delay = 180 + echo * 6;
+      lavfi.add('aecho=0.8:${decay.toStringAsFixed(2)}:$delay:0.35');
+    }
+    if (lavfi.isNotEmpty) parts.add('lavfi=[${lavfi.join(',')}]');
+
+    final bass = double.tryParse('${fx['bass'] ?? 0}') ?? 0.0;
+    final treble = double.tryParse('${fx['treble'] ?? 0}') ?? 0.0;
+    if (bass.abs() >= 0.1) {
+      parts.add('equalizer=f=100:width_type=o:width=2:g=${bass.toStringAsFixed(1)}');
+    }
+    if (treble.abs() >= 0.1) {
+      parts.add('equalizer=f=8000:width_type=o:width=2:g=${treble.toStringAsFixed(1)}');
+    }
+
+    final pitch = double.tryParse('${fx['pitch'] ?? 0}') ?? 0.0;
+    if (pitch.abs() >= 0.01) {
+      final ratio = math.pow(2.0, pitch / 12.0).toDouble();
+      parts.add('rubberband=pitch-scale=${ratio.toStringAsFixed(5)}');
+    }
+    return parts.join(',');
+  }
+
+  static Future<void> _setVideoVisible(bool visible) async {
+    final hwnd = _hwnd;
+    if (hwnd == null || !PHConfig.embedInFlutter) return;
+    if (visible) await NativeWindow.resizeMpvChild(hwnd);
+    await NativeWindow.setMpvVisible(hwnd, visible);
+  }
+
   static Future<void> stop() async {
     if (!Platform.isWindows) return;
+    await _setVideoVisible(false);
     try {
       _proc?.kill();
     } catch (_) {}
     _proc = null;
+    _hwnd = null;
     _started = false;
-    if (PHConfig.killMpvOnClose) {
-      await _taskkill();
-    }
+    _startingFuture = null;
+    if (PHConfig.killMpvOnClose) await _taskkill();
   }
 
-  /// Matikan semua `mpv.exe` (kiosk khusus PurpleHat).
   static Future<void> _taskkill() async {
     try {
-      await Process.run(
-        'taskkill',
-        <String>['/F', '/IM', PHConfig.mpvExe, '/T'],
-      );
+      await Process.run('taskkill', <String>['/F', '/IM', PHConfig.mpvExe, '/T']);
     } catch (_) {
-      // Tidak ada proses / taskkill tidak tersedia -> abaikan.
+      // Tidak ada proses/taskkill tidak tersedia.
     }
   }
 }

@@ -142,27 +142,93 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
         return;
       }
       if (data['type'] == 'startMpv') {
-        // Lazy start mpv saat webview request play
-        if (_isDesktop) {
-          MpvService.ensureStarted();
-        }
+        if (_isDesktop) _startMpvAndReply();
         return;
       }
       if (data['type'] == 'checkMpvReady') {
-        // Cek apakah mpv sudah siap dipakai
-        if (_isDesktop) {
-          MpvService.isReady().then((ready) {
-            _controller.runJavaScript('''
-              (function() {
-                if (window.onMpvReady) window.onMpvReady($ready);
-              })();
-            ''');
-          });
+        if (_isDesktop) _replyMpvReady();
+        return;
+      }
+      if (data['type'] == 'mpvCommand') {
+        if (_isDesktop && data['command'] is List) {
+          _runMpvCommand(data);
+        }
+        return;
+      }
+      if (data['type'] == 'mpvState') {
+        if (_isDesktop) _replyMpvState();
+        return;
+      }
+      if (data['type'] == 'mpvFx') {
+        if (_isDesktop && data['fx'] is Map) {
+          MpvService.applyFx(Map<String, dynamic>.from(data['fx'] as Map));
         }
         return;
       }
     } catch (e) {
       print('WebMessage error: $e');
+    }
+  }
+
+  Future<void> _startMpvAndReply() async {
+    var ready = false;
+    try {
+      await MpvService.ensureStarted();
+      ready = await MpvService.isReady();
+    } catch (e) {
+      debugPrint('Mpv startup error: $e');
+    }
+    if (!mounted) return;
+    try {
+      await _controller.runJavaScript(
+        'if (window.onMpvReady) window.onMpvReady($ready);',
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _replyMpvReady() async {
+    final ready = await MpvService.isReady();
+    if (!mounted) return;
+    try {
+      await _controller.runJavaScript(
+        'if (window.onMpvReady) window.onMpvReady($ready);',
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _runMpvCommand(Map<String, dynamic> data) async {
+    final rawCommand = data['command'];
+    if (rawCommand is! List) return;
+    final requestId = data['requestId'] is num
+        ? (data['requestId'] as num).toInt()
+        : 0;
+    final result = await MpvService.command(List<dynamic>.from(rawCommand));
+    final normalized = <String, dynamic>{
+      'ok': result['error'] == 'success',
+      'error': result['error'],
+      'message': result['message'],
+      'data': result['data'],
+    };
+    if (!mounted) return;
+    try {
+      await _controller.runJavaScript(
+        'if (window.onMpvCommandResult) '
+        'window.onMpvCommandResult($requestId, ${jsonEncode(normalized)});',
+      );
+    } catch (e) {
+      debugPrint('Mpv command callback error: $e');
+    }
+  }
+
+  Future<void> _replyMpvState() async {
+    final state = await MpvService.getState();
+    if (!mounted) return;
+    try {
+      await _controller.runJavaScript(
+        'if (window.onMpvState) window.onMpvState(${jsonEncode(state)});',
+      );
+    } catch (e) {
+      debugPrint('Mpv state callback error: $e');
     }
   }
 
@@ -255,15 +321,19 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
 
         // Cadangan: screen.js memakai helper global postToHost().
         try {
+          // Semua payload screen.js masuk ke Flutter melalui wrapper object
+          // yang memang diharapkan oleh webview_win_floating.
           window.postToHost = function(m) {
-            var volume = extractVolume(m);
+            var payload = m;
+            try {
+              if (typeof payload === 'string') payload = JSON.parse(payload);
+            } catch (e) {}
+            var volume = extractVolume(payload);
             if (volume !== null) {
               sendVolume(volume);
               return;
             }
-            try {
-              nativePostMessage(typeof m === 'string' ? m : JSON.stringify(m));
-            } catch (e) {}
+            postToBridge(payload);
           };
         } catch (e) {}
 

@@ -59,6 +59,27 @@ class NativeWindow {
     }
   }
 
+  /// Tampilkan/sembunyikan child window mpv. Saat standby jendela mpv harus
+  /// tersembunyi agar layar pairing/WebView tetap terlihat.
+  static Future<void> setMpvVisible(int parent, bool visible) async {
+    final child = await findMpvChild(parent);
+    if (child == null) return;
+    if (visible) {
+      await resizeMpvChild(parent);
+      _setWindowPosTop(child);
+      _showWindow(child, true);
+    } else {
+      _showWindow(child, false);
+    }
+  }
+
+  static void _showWindow(int hwnd, bool visible) {
+    final show = _lib.lookupFunction<_ShowWindowNative, _ShowWindowDart>(
+      'ShowWindow',
+    );
+    show(hwnd, visible ? 5 : 0); // SW_SHOW / SW_HIDE
+  }
+
   /// Resize the mpv child window to match the parent (Flutter) window client area.
   static Future<void> resizeMpvChild(int parent) async {
     final child = await findMpvChild(parent);
@@ -71,8 +92,7 @@ class NativeWindow {
       final width = rect.ref.right - rect.ref.left;
       final height = rect.ref.bottom - rect.ref.top;
       const int SWP_NOZORDER = 0x0004;
-      const int SWP_SHOWWINDOW = 0x0040;
-      setWindowPos(child, 0, 0, 0, width, height, SWP_NOZORDER | SWP_SHOWWINDOW);
+      setWindowPos(child, 0, 0, 0, width, height, SWP_NOZORDER);
     } finally {
       calloc.free(rect);
     }
@@ -139,6 +159,9 @@ typedef _GetActiveWindowDart = int Function();
 
 typedef _FindWindowExWNative = IntPtr Function(IntPtr parent, IntPtr childAfter, Pointer<Utf16> className, Pointer<Utf16> windowName);
 typedef _FindWindowExWDart = int Function(int parent, int childAfter, Pointer<Utf16> className, Pointer<Utf16> windowName);
+
+typedef _ShowWindowNative = Int32 Function(IntPtr hWnd, Int32 nCmdShow);
+typedef _ShowWindowDart = int Function(int hWnd, int nCmdShow);
 
 typedef _SetWindowPosNative = Int32 Function(IntPtr hWnd, IntPtr hWndInsertAfter, Int32 X, Int32 Y, Int32 cx, Int32 cy, Uint32 uFlags);
 typedef _SetWindowPosDart = int Function(int hWnd, int hWndInsertAfter, int X, int Y, int cx, int cy, int uFlags);
