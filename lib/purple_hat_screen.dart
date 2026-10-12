@@ -222,7 +222,21 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
   }
 
   Future<void> _replyMpvState() async {
-    final state = await MpvService.getState();
+    Map<String, dynamic> state;
+    try {
+      state = await MpvService.getState();
+    } catch (e) {
+      debugPrint('Mpv state read error: $e');
+      state = <String, dynamic>{
+        'available': false,
+        'playing': false,
+        'paused': true,
+        'position': 0,
+        'duration': 0,
+        'path': null,
+        'ended': false,
+      };
+    }
     if (!mounted) return;
     try {
       await _controller.runJavaScript(

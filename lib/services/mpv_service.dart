@@ -21,6 +21,7 @@ class MpvService {
   static String? _exePath;
   static int? _hwnd;
   static bool _started = false;
+  static bool _paused = true;
   static Future<void>? _startingFuture;
   static int _requestId = 0;
 
@@ -213,21 +214,29 @@ class MpvService {
     final response = await _sendRaw(command);
     final success = response['error'] == 'success';
     if (success && command.first == 'loadfile') {
-      // loadfile sudah mengganti sumber. Kirim unpause dan tampilkan video,
-      // tanpa menahan transisi untuk memasang ulang FX yang tetap aktif di mpv.
-      await _sendRaw(<dynamic>['set_property', 'pause', false]);
+      // loadfile mengganti sumber; unpause sekali agar play benar-benar mulai.
+      final resume = await _sendRaw(<dynamic>['set_property', 'pause', false]);
+      _paused = resume['error'] != 'success';
       await _setVideoVisible(true);
     } else if (success && command.first == 'stop') {
+      _paused = true;
       await _setVideoVisible(false);
+    } else if (success &&
+        command.first == 'set_property' &&
+        command.length > 2 &&
+        command[1] == 'pause') {
+      _paused = command[2] == true;
     }
     return response;
   }
 
   static Future<Map<String, dynamic>> _sendRaw(List<dynamic> command) async {
-    if (!Platform.isWindows || !await _probeIpcPipe()) {
-      return <String, dynamic>{'error': 'mpv_not_ready'};
+    if (!Platform.isWindows) {
+      return <String, dynamic>{'error': 'unsupported_platform'};
     }
 
+    // Native langsung mencoba membuka pipe. Jangan melakukan probe tambahan
+    // untuk setiap perintah: polling status sebelumnya menggandakan round-trip.
     final requestId = ++_requestId;
     try {
       final raw = await _ipc.invokeMethod<String>(
@@ -266,7 +275,7 @@ class MpvService {
 
   /// State lokal mpv; tidak meminta status dari backend yang mungkin berada VPS.
   static Future<Map<String, dynamic>> getState() async {
-    if (!Platform.isWindows || !await isReady()) {
+    if (!Platform.isWindows || !_started) {
       return <String, dynamic>{
         'available': false,
         'playing': false,
@@ -279,7 +288,8 @@ class MpvService {
     }
 
     // Berurutan karena mpv Windows memakai satu instance named-pipe server.
-    final paused = await _property('pause');
+    // Pause ditrack dari respons command; query cukup mengambil progress,
+    // durasi, file aktif, dan EOF. Ini mengurangi IPC saat playback berjalan.
     final position = await _property('time-pos');
     final duration = await _property('duration');
     final path = await _property('path');
@@ -289,8 +299,8 @@ class MpvService {
 
     return <String, dynamic>{
       'available': true,
-      'playing': hasFile && paused != true && !ended,
-      'paused': paused == true,
+      'playing': hasFile && !_paused && !ended,
+      'paused': _paused,
       'position': (position as num?)?.toDouble() ?? 0.0,
       'duration': (duration as num?)?.toDouble() ?? 0.0,
       'path': path,
@@ -406,6 +416,7 @@ class MpvService {
     _proc = null;
     _hwnd = null;
     _started = false;
+    _paused = true;
     _startingFuture = null;
     if (PHConfig.killMpvOnClose) await _taskkill();
   }
