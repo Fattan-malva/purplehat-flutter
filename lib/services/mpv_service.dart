@@ -90,7 +90,21 @@ class MpvService {
     if (PHConfig.killMpvOnStart) await _taskkill();
 
     int? hwnd;
-    if (PHConfig.embedInFlutter) hwnd = await NativeWindow.flutterWindow();
+    if (PHConfig.embedInFlutter) {
+      hwnd = await NativeWindow.flutterWindow();
+      if (hwnd == null) {
+        // Jangan membuka mpv sebagai fullscreen terpisah saat standby. Tunggu
+        // sampai HWND host Flutter tersedia lalu retry dari menu pairing.
+        debugPrint(
+          'MpvService: HWND Flutter tidak ditemukan; mpv tidak dijalankan '
+          'untuk mencegah jendela karaoke menutupi layar pairing.',
+        );
+        _started = false;
+        _proc = null;
+        _hwnd = null;
+        return;
+      }
+    }
 
     final args = <String>[
       '--input-ipc-server=${PHConfig.mpvPipe}',
