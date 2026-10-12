@@ -444,7 +444,7 @@ class MpvService {
   static Future<void> _setVideoVisible(bool visible) async {
     final hwnd = _hwnd;
     if (hwnd == null || !PHConfig.embedInFlutter) return;
-    if (visible) await NativeWindow.resizeMpvChild(hwnd);
+    // setMpvVisible menangani resize dan show/hide dalam satu pencarian HWND.
     await NativeWindow.setMpvVisible(hwnd, visible);
   }
 
