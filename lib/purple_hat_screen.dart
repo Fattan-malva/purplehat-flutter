@@ -7,6 +7,9 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'config.dart';
+import 'services/device_identity.dart';
+import 'services/mpv_service.dart';
 import 'services/volume_service.dart';
 
 /// window_manager hanya untuk desktop; di Android/iOS tidak tersedia.
@@ -26,6 +29,7 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
     with WindowListener {
   late final WebViewController _controller;
   bool _closing = false;
+  String _deviceId = '';
 
   @override
   void initState() {
@@ -62,6 +66,10 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
 
     _controller.setNavigationDelegate(
       NavigationDelegate(
+        onPageStarted: (url) {
+          // Identitas device (MAC) untuk resolusi room karaoke.
+          _injectDeviceIdentity();
+        },
         onPageFinished: (url) {
           _injectJavaScriptBridge();
         },
@@ -82,9 +90,53 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
       ),
     );
 
-    _controller.loadRequest(
-      Uri.parse('https://purplehat.mallvaa.xyz/screen/index.html'),
+    _bootstrap();
+  }
+
+  /// Jalankan mpv (sumber Karaoke), deteksi identitas device, lalu buka layar
+  /// dengan `?mac=...` supaya layar me-resolve room yang tepat (pairing stabil
+  /// per device). Lihat `docs/KARAOKE.md`.
+  Future<void> _bootstrap() async {
+    // Windows: jalankan mpv yang ikut ter-bundle (folder `mpv/`).
+    if (_isDesktop) {
+      await MpvService.start();
+    }
+
+    _deviceId = await DeviceIdentity.get();
+
+    final base = Uri.parse(PHConfig.screenUrl);
+    final uri = base.replace(
+      queryParameters: <String, String>{
+        ...base.queryParameters,
+        if (_deviceId.isNotEmpty) 'mac': _deviceId,
+      },
     );
+
+    try {
+      await _controller.loadRequest(uri);
+    } catch (e) {
+      debugPrint('Load screen error: $e');
+    }
+  }
+
+  /// Suntikkan identitas device sebagai global JS. Cadangan bila query string
+  /// `?mac=` tidak terbaca (mis. setelah navigasi internal tanpa query).
+  Future<void> _injectDeviceIdentity() async {
+    if (_deviceId.isEmpty) return;
+    final mac = jsonEncode(_deviceId); // aman untuk disisipkan ke JS
+    final script = '''
+      (function(){
+        try {
+          window.purplehatDeviceMac = $mac;
+          window.purplehat = Object.assign(window.purplehat || {}, { deviceMac: $mac });
+        } catch (e) {}
+      })();
+    ''';
+    try {
+      await _controller.runJavaScript(script);
+    } catch (e) {
+      debugPrint('Inject device identity error: $e');
+    }
   }
 
   void _handleWebMessage(String message) {
@@ -100,6 +152,9 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
   }
 
   Future<void> _injectJavaScriptBridge() async {
+    // Pastikan identitas device terpasang di halaman (cadangan query string).
+    await _injectDeviceIdentity();
+
     // screen.js milik web memanggil volume lewat API WebView2:
     //   window.chrome.webview.postMessage(JSON.stringify({type:'volume', value:N}))
     //
@@ -328,6 +383,11 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
       await _controller.runJavaScript(script);
     } catch (e) {
       print('FormClosing cleanup: $e');
+    }
+
+    // Hentikan mpv yang dijalankan aplikasi ini (sumber Karaoke).
+    if (_isDesktop) {
+      await MpvService.stop();
     }
 
     // Desktop: benar-benar tutup window (walaupun preventClose aktif).

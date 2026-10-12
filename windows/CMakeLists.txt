@@ -102,6 +102,21 @@ install(CODE "
 install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)
 
+# === Bundel mpv (sumber Karaoke) ===
+# Salin folder `../mpv` (mpv.exe + DLL pendukung) ke `<Release>/mpv/` supaya
+# aplikasi mandiri: untuk device baru cukup copy folder Release, tanpa install
+# mpv terpisah. Isi folder dibuat oleh tools/download_mpv.ps1 (lihat docs/KARAOKE.md).
+set(MPV_BUNDLE_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../mpv")
+if(EXISTS "${MPV_BUNDLE_SRC}")
+  install(DIRECTORY "${MPV_BUNDLE_SRC}/"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/mpv"
+    COMPONENT Runtime)
+else()
+  message(WARNING
+    "Folder '${MPV_BUNDLE_SRC}' tidak ditemukan. Jalankan "
+    "'tools/download_mpv.ps1' supaya mpv ikut ter-bundle di folder Release.")
+endif()
+
 # Install the AOT library on non-Debug builds only.
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release

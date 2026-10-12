@@ -1,0 +1,9 @@
+# Folder ini terisi mpv.exe + DLL pendukung setelah menjalankan:
+#
+#   powershell -ExecutionPolicy Bypass -File tools/download_mpv.ps1
+#
+# Isi folder di-ignore git (binari besar). Folder ini tetap ada sebagai
+# penanda supaya aturan install di windows/CMakeLists.txt menemukannya.
+*
+!.gitignore
+!README.md
