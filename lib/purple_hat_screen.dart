@@ -208,6 +208,7 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
       'error': result['error'],
       'message': result['message'],
       'data': result['data'],
+      'command': rawCommand,
     };
     if (!mounted) return;
     try {

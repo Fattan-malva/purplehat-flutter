@@ -5,8 +5,12 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "window_channel.h"
@@ -14,6 +18,21 @@
 // IPC mpv berada lokal di kiosk Windows. Backend Python boleh berjalan di VPS.
 namespace {
 constexpr wchar_t kMpvPipePath[] = L"\\\\.\\pipe\\purplehat-mpv";
+
+std::mutex g_mpv_ipc_mutex;
+
+std::optional<long long> ExtractRequestId(const std::string& json) {
+  const size_t key = json.find("\"request_id\"");
+  if (key == std::string::npos) return std::nullopt;
+  const size_t colon = json.find(':', key);
+  if (colon == std::string::npos) return std::nullopt;
+  const char* begin = json.c_str() + colon + 1;
+  while (*begin && std::isspace(static_cast<unsigned char>(*begin))) ++begin;
+  char* end = nullptr;
+  const long long value = std::strtoll(begin, &end, 10);
+  if (end == begin) return std::nullopt;
+  return value;
+}
 
 HANDLE ConnectMpvPipe(DWORD timeout_ms) {
   const ULONGLONG started = GetTickCount64();
@@ -39,12 +58,20 @@ HANDLE ConnectMpvPipe(DWORD timeout_ms) {
 }
 
 bool IsMpvPipeReady() {
-  // Probe ketersediaan instance tanpa mengambil koneksi pipe dari perintah
-  // yang mungkin sedang berjalan.
-  return WaitNamedPipeW(kMpvPipePath, 0) != FALSE;
+  // ERROR_SEM_TIMEOUT berarti named pipe ada tetapi instance sedang dipakai.
+  // Itu tetap berarti mpv tersedia; ERROR_FILE_NOT_FOUND berarti belum start.
+  if (WaitNamedPipeW(kMpvPipePath, 0) != FALSE) return true;
+  return GetLastError() == ERROR_SEM_TIMEOUT;
 }
 
 std::string SendMpvIpc(const std::string& payload) {
+  // mpv Windows IPC biasanya hanya menerima satu klien pipe pada satu waktu.
+  // Serialisasikan seluruh request dan jangan pernah mengembalikan event lama
+  // sebagai jawaban command yang sedang diminta.
+  std::lock_guard<std::mutex> lock(g_mpv_ipc_mutex);
+  const auto expected_id = ExtractRequestId(payload);
+  if (!expected_id.has_value()) return {};
+
   HANDLE pipe = ConnectMpvPipe(1500);
   if (pipe == INVALID_HANDLE_VALUE) return {};
 
@@ -57,14 +84,14 @@ std::string SendMpvIpc(const std::string& payload) {
     return {};
   }
 
-  std::string response;
-  response.reserve(1024);
-  const ULONGLONG deadline = GetTickCount64() + 2500;
-  while (GetTickCount64() < deadline && response.size() < 65536) {
+  std::string pending;
+  pending.reserve(2048);
+  const ULONGLONG deadline = GetTickCount64() + 1800;
+  while (GetTickCount64() < deadline && pending.size() < 65536) {
     DWORD available = 0;
     if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) break;
     if (available == 0) {
-      Sleep(5);
+      Sleep(3);
       continue;
     }
 
@@ -76,16 +103,35 @@ std::string SendMpvIpc(const std::string& payload) {
         bytes_read == 0) {
       break;
     }
-    response.append(buffer, bytes_read);
-    const size_t newline = response.find('\n');
-    if (newline != std::string::npos) {
-      response.resize(newline);
-      break;
+    pending.append(buffer, bytes_read);
+
+    size_t newline = std::string::npos;
+    while ((newline = pending.find('\n')) != std::string::npos) {
+      std::string candidate = pending.substr(0, newline);
+      pending.erase(0, newline + 1);
+      while (!candidate.empty() &&
+             std::isspace(static_cast<unsigned char>(candidate.back()))) {
+        candidate.pop_back();
+      }
+      size_t first = 0;
+      while (first < candidate.size() &&
+             std::isspace(static_cast<unsigned char>(candidate[first]))) {
+        ++first;
+      }
+      if (first > 0) candidate.erase(0, first);
+      if (candidate.empty()) continue;
+
+      const auto reply_id = ExtractRequestId(candidate);
+      if (reply_id.has_value() && reply_id.value() == expected_id.value()) {
+        CloseHandle(pipe);
+        return candidate;
+      }
+      // Abaikan event mpv dan balasan untuk request lain.
     }
   }
 
   CloseHandle(pipe);
-  return response;
+  return {};
 }
 }  // namespace
 
@@ -215,12 +261,22 @@ bool FlutterWindow::OnCreate() {
           return;
         }
 
-        const std::string reply = SendMpvIpc(*payload);
-        if (reply.empty()) {
-          result->Error("MPV_IPC", "mpv IPC timeout or pipe unavailable");
-          return;
-        }
-        result->Success(flutter::EncodableValue(reply));
+        // Salin payload karena arguments milik MethodCall akan dilepas
+        // setelah handler selesai. Semua operasi pipe berjalan di worker agar
+        // Flutter/UI thread tidak macet saat mpv belum membalas.
+        const std::string payload_copy = *payload;
+        auto async_result =
+            std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+                std::move(result));
+        std::thread([payload_copy, async_result]() {
+          const std::string reply = SendMpvIpc(payload_copy);
+          if (reply.empty()) {
+            async_result->Error("MPV_IPC",
+                                "mpv IPC timeout or pipe unavailable");
+            return;
+          }
+          async_result->Success(flutter::EncodableValue(reply));
+        }).detach();
       });
 
   window_channel_ = std::make_unique<purplehat::WindowChannel>(

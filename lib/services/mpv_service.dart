@@ -202,8 +202,9 @@ class MpvService {
     final response = await _sendRaw(command);
     final success = response['error'] == 'success';
     if (success && command.first == 'loadfile') {
+      // loadfile sudah mengganti sumber. Kirim unpause dan tampilkan video,
+      // tanpa menahan transisi untuk memasang ulang FX yang tetap aktif di mpv.
       await _sendRaw(<dynamic>['set_property', 'pause', false]);
-      await _applyFx();
       await _setVideoVisible(true);
     } else if (success && command.first == 'stop') {
       await _setVideoVisible(false);
