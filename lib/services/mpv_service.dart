@@ -63,10 +63,9 @@ class MpvService {
       return;
     }
 
-    if (_started) {
-      if (await _probeIpcPipe()) return;
-      _started = false;
-    }
+    // Jangan start ulang mpv hanya karena pipe sedang sibuk melayani satu
+    // perintah. Kesiapan IPC diperiksa terpisah sebelum setiap operasi.
+    if (_started && _proc != null) return;
 
     final startup = _startInternal();
     _startingFuture = startup;
@@ -168,9 +167,9 @@ class MpvService {
 
   static Future<bool> isReady() async {
     if (!Platform.isWindows || !_started) return false;
-    final ready = await _probeIpcPipe();
-    if (!ready) _started = false;
-    return ready;
+    // Satu probe bisa bertepatan dengan perintah IPC lain. Jangan mengubah
+    // lifecycle proses hanya dari satu hasil probe yang sementara gagal.
+    return _probeIpcPipe();
   }
 
   static Future<bool> _waitForIpcPipe({

@@ -39,10 +39,9 @@ HANDLE ConnectMpvPipe(DWORD timeout_ms) {
 }
 
 bool IsMpvPipeReady() {
-  HANDLE pipe = ConnectMpvPipe(0);
-  if (pipe == INVALID_HANDLE_VALUE) return false;
-  CloseHandle(pipe);
-  return true;
+  // Probe ketersediaan instance tanpa mengambil koneksi pipe dari perintah
+  // yang mungkin sedang berjalan.
+  return WaitNamedPipeW(kMpvPipePath, 0) != FALSE;
 }
 
 std::string SendMpvIpc(const std::string& payload) {
