@@ -148,13 +148,10 @@ class MpvService {
         '${hwnd != null ? 'embedded wid=$hwnd' : 'jendela terpisah'}.',
       );
 
-      // mpv memakai --force-window=immediate; sembunyikan jendela kosong
-      // setelah native child window tersedia, agar QR/player web tetap terlihat.
+      // Jangan izinkan menu pindah dari QR sebelum child window kosong mpv
+      // benar-benar disembunyikan. Jika tidak, jendela hitam bisa menimpa UI.
       if (hwnd != null) {
-        Future<void>.delayed(const Duration(milliseconds: 350), () async {
-          await NativeWindow.resizeMpvChild(hwnd!);
-          await NativeWindow.setMpvVisible(hwnd, false);
-        });
+        await NativeWindow.setMpvVisible(hwnd, false);
       }
     } catch (error) {
       _started = false;
