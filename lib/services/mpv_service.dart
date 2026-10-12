@@ -227,14 +227,20 @@ class MpvService {
       return <String, dynamic>{'error': 'empty_command'};
     }
     if (!_started) await ensureStarted();
-    if (!await isReady()) {
+    if (!_started) {
       return <String, dynamic>{
         'error': 'mpv_not_ready',
         'message': 'mpv belum siap menerima perintah.',
       };
     }
 
+    // Tidak perlu memanggil MethodChannel 'ready' untuk setiap kontrol.
+    // Native akan membuka IPC langsung dan mengembalikan error bila mpv mati.
     final response = await _sendRaw(command);
+    if (response['error'] == 'mpv_not_ready' ||
+        response['error'] == 'ipc_exception') {
+      _started = false;
+    }
     final success = response['error'] == 'success';
     if (success && command.first == 'loadfile') {
       // loadfile mengganti sumber; unpause sekali agar play benar-benar mulai.
@@ -340,14 +346,14 @@ class MpvService {
   ) {
     return _queueIpc<Map<String, dynamic>>(() async {
       for (final key in <String>[
-      'pitch',
-      'echo',
-      'tempo',
-      'bass',
-      'treble',
-      'channel',
-    ]) {
-      if (fx.containsKey(key) && fx[key] != null) _fx[key] = fx[key];
+        'pitch',
+        'echo',
+        'tempo',
+        'bass',
+        'treble',
+        'channel',
+      ]) {
+        if (fx.containsKey(key) && fx[key] != null) _fx[key] = fx[key];
       }
       return _applyFx();
     });
