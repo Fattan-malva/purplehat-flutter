@@ -18,6 +18,15 @@ dependencies:
   ffi: ^2.1.0
 
 
+# Plugin WebView2 di-vendor & dipatch agar izin `autoplay` bisa diberikan
+# (WebView2 menolak autoplay bersuara tanpa izin ini). Lihat
+# third_party/webview_win_floating — pemetaan COREWEBVIEW2_PERMISSION_KIND
+# ditambah `autoplay` + guard agar kind baru tidak RangeError.
+dependency_overrides:
+  webview_win_floating:
+    path: third_party/webview_win_floating
+
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_win_floating/webview_win_floating.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'config.dart';
@@ -43,7 +44,21 @@ class _PurpleHatScreenState extends State<PurpleHatScreen>
       windowManager.setPreventClose(true);
     }
 
-    _controller = WebViewController();
+    // Kiosk hanya menampilkan situs Purplehat sendiri. Izinkan HANYA autoplay
+    // (Windows/WebView2) supaya embed Spotify tidak mulai dalam keadaan mute
+    // beberapa detik; permintaan izin lain ditolak. Di Android autoplay sudah
+    // dibuka lewat setMediaPlaybackRequiresUserGesture(false) di bawah.
+    _controller = WebViewController(
+      onPermissionRequest: (WebViewPermissionRequest request) {
+        final platformRequest = request.platform;
+        if (platformRequest is WinWebViewPermissionRequest &&
+            platformRequest.kind == WinWebViewPermissionResourceType.autoplay) {
+          request.grant();
+        } else {
+          request.deny();
+        }
+      },
+    );
 
     // Android: izinkan media (YouTube/audio) autoplay tanpa gesture user.
     // Di Windows autoplay diatur lewat argumen WebView2
